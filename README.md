@@ -5,4 +5,4 @@ ESP ZHA Router configured with one button switch and one microphone "clapper" sw
 
 # Kudos
 
-(prairiesnpr)[https://github.com/prairiesnpr/esp_zha_quad_switch]
+[prairiesnpr](https://github.com/prairiesnpr/esp_zha_quad_switch)
