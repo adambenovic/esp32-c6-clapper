@@ -10,7 +10,7 @@
 #define SOUND_SENSOR_PIN    GPIO_NUM_4
 #define BUTTON_PIN          GPIO_NUM_22
 #define LED_PIN             GPIO_NUM_5
-#define DEBOUNCE_US         (500 * 1000)
+#define DEBOUNCE_US         (2 * 1000 * 1000)
 #define EP_BUTTON           1
 #define EP_CLAPPER          2
 
@@ -112,6 +112,10 @@ static void button_task(void *arg)
 
 static esp_zb_ep_list_t *create_endpoints(void)
 {
+    /* ZCL character strings: first byte is length */
+    static char manufacturer[] = "\x0Aadambenovic";
+    static char model_id[]     = "\x0Ac6clapper";
+
     esp_zb_basic_cluster_cfg_t basic_cfg = {
         .zcl_version = ESP_ZB_ZCL_BASIC_ZCL_VERSION_DEFAULT_VALUE,
         .power_source = 0x01,
@@ -121,9 +125,11 @@ static esp_zb_ep_list_t *create_endpoints(void)
     esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
 
     /* EP_BUTTON: physical button */
+    esp_zb_attribute_list_t *btn_basic = esp_zb_basic_cluster_create(&basic_cfg);
+    esp_zb_basic_cluster_add_attr(btn_basic, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, manufacturer);
+    esp_zb_basic_cluster_add_attr(btn_basic, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, model_id);
     esp_zb_cluster_list_t *btn_clusters = esp_zb_zcl_cluster_list_create();
-    esp_zb_cluster_list_add_basic_cluster(btn_clusters,
-        esp_zb_basic_cluster_create(&basic_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_cluster_list_add_basic_cluster(btn_clusters, btn_basic, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_cluster_list_add_on_off_cluster(btn_clusters,
         esp_zb_on_off_cluster_create(&on_off_cfg), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
     esp_zb_ep_list_add_ep(ep_list, btn_clusters, (esp_zb_endpoint_config_t){
@@ -134,9 +140,11 @@ static esp_zb_ep_list_t *create_endpoints(void)
     });
 
     /* EP_CLAPPER: sound sensor */
+    esp_zb_attribute_list_t *clap_basic = esp_zb_basic_cluster_create(&basic_cfg);
+    esp_zb_basic_cluster_add_attr(clap_basic, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, manufacturer);
+    esp_zb_basic_cluster_add_attr(clap_basic, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, model_id);
     esp_zb_cluster_list_t *clap_clusters = esp_zb_zcl_cluster_list_create();
-    esp_zb_cluster_list_add_basic_cluster(clap_clusters,
-        esp_zb_basic_cluster_create(&basic_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_cluster_list_add_basic_cluster(clap_clusters, clap_basic, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_cluster_list_add_on_off_cluster(clap_clusters,
         esp_zb_on_off_cluster_create(&on_off_cfg), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
     esp_zb_ep_list_add_ep(ep_list, clap_clusters, (esp_zb_endpoint_config_t){
