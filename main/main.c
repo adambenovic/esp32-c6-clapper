@@ -7,17 +7,30 @@
 #include "driver/gpio.h"
 #include "ha/esp_zigbee_ha_standard.h"
 
-#define SOUND_SENSOR_PIN    GPIO_NUM_4
-#define BUTTON_PIN          GPIO_NUM_22
-#define LED_PIN             GPIO_NUM_5
-#define DEBOUNCE_US         (2 * 1000 * 1000)
-#define EP_BUTTON           1
-#define EP_CLAPPER          2
+#define SOUND_SENSOR_PIN        GPIO_NUM_4
+#define BUTTON_PIN              GPIO_NUM_22
+#define LED_PIN                 GPIO_NUM_5
+
+/* Clap pattern: 3 claps, each 150–1500 ms apart, within a 4 s window */
+#define CLAP_DEBOUNCE_US        (150 * 1000)
+#define CLAP_MAX_GAP_US         (1500 * 1000)
+#define CLAP_WINDOW_US          (4000 * 1000)
+#define CLAP_REQUIRED           3
+
+/* Button debounce */
+#define BUTTON_DEBOUNCE_US      (50 * 1000)
+
+/* Zigbee endpoints */
+#define EP_BUTTON               1
+#define EP_CLAPPER              2
 
 static const char *TAG = "ZB_CLAPPER";
 static QueueHandle_t sound_evt_queue = NULL;
-static bool led_state = false;
-static bool zb_started = false;
+static bool button_state  = false;
+static bool clapper_state = false;
+static bool zb_started    = false;
+
+/* ── Zigbee stack callbacks ──────────────────────────────────────────── */
 
 void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 {
@@ -40,7 +53,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         break;
     case ESP_ZB_BDB_SIGNAL_STEERING:
         if (err_status == ESP_OK) {
-            ESP_LOGI(TAG, "Joined Zigbee network, addr: 0x%04hx", esp_zb_get_short_address());
+            ESP_LOGI(TAG, "Joined network, addr: 0x%04hx", esp_zb_get_short_address());
         } else {
             ESP_LOGW(TAG, "Steering failed, retrying...");
             esp_zb_scheduler_alarm((esp_zb_callback_t)esp_zb_bdb_start_top_level_commissioning,
@@ -52,20 +65,40 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
     }
 }
 
-static void send_toggle(uint8_t src_ep)
+static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
 {
-    if (!zb_started) {
-        return;
+    if (callback_id == ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID) {
+        const esp_zb_zcl_set_attr_value_message_t *msg = message;
+        if (msg->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF &&
+            msg->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
+            bool on = *(uint8_t *)msg->attribute.data.value;
+            if (msg->info.dst_endpoint == EP_BUTTON) {
+                button_state = on;
+            } else if (msg->info.dst_endpoint == EP_CLAPPER) {
+                clapper_state = on;
+            }
+            gpio_set_level(LED_PIN, button_state || clapper_state);
+        }
     }
-    esp_zb_zcl_on_off_cmd_t cmd = {
-        .zcl_basic_cmd.src_endpoint = src_ep,
-        .address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT,
-        .on_off_cmd_id = ESP_ZB_ZCL_CMD_ON_OFF_TOGGLE_ID,
-    };
+    return ESP_OK;
+}
+
+/* ── Zigbee attribute update ─────────────────────────────────────────── */
+
+static void zb_set_on_off(uint8_t ep, bool on)
+{
+    if (!zb_started) return;
+    uint8_t value = on ? 1 : 0;
     esp_zb_lock_acquire(portMAX_DELAY);
-    esp_zb_zcl_on_off_cmd_req(&cmd);
+    esp_zb_zcl_set_attribute_val(ep,
+        ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
+        &value, false);
     esp_zb_lock_release();
 }
+
+/* ── ISR + tasks ─────────────────────────────────────────────────────── */
 
 static void IRAM_ATTR sound_isr_handler(void *arg)
 {
@@ -78,16 +111,38 @@ static void IRAM_ATTR sound_isr_handler(void *arg)
 static void sound_sensor_task(void *arg)
 {
     int64_t evt_time = 0;
-    int64_t last_triggered = 0;
+    int64_t clap_times[CLAP_REQUIRED] = {0};
+    int clap_count = 0;
+
     while (1) {
-        if (xQueueReceive(sound_evt_queue, &evt_time, portMAX_DELAY)) {
-            if ((evt_time - last_triggered) >= DEBOUNCE_US) {
-                last_triggered = evt_time;
-                led_state = !led_state;
-                gpio_set_level(LED_PIN, led_state);
-                ESP_LOGI(TAG, "Clap! LED %s", led_state ? "ON" : "OFF");
-                send_toggle(EP_CLAPPER);
-            }
+        if (!xQueueReceive(sound_evt_queue, &evt_time, portMAX_DELAY)) continue;
+
+        int64_t last = clap_count > 0 ? clap_times[clap_count - 1] : 0;
+
+        /* Ignore pulses within debounce window */
+        if (clap_count > 0 && (evt_time - last) < CLAP_DEBOUNCE_US) continue;
+
+        /* Gap too large — clap pattern broken, start over */
+        if (clap_count > 0 && (evt_time - last) > CLAP_MAX_GAP_US) {
+            ESP_LOGD(TAG, "Clap gap too large, reset");
+            clap_count = 0;
+        }
+
+        /* Whole window expired — reset */
+        if (clap_count > 0 && (evt_time - clap_times[0]) > CLAP_WINDOW_US) {
+            ESP_LOGD(TAG, "Clap window expired, reset");
+            clap_count = 0;
+        }
+
+        clap_times[clap_count++] = evt_time;
+        ESP_LOGI(TAG, "Clap %d/%d", clap_count, CLAP_REQUIRED);
+
+        if (clap_count >= CLAP_REQUIRED) {
+            clap_count = 0;
+            clapper_state = !clapper_state;
+            gpio_set_level(LED_PIN, button_state || clapper_state);
+            ESP_LOGI(TAG, "3-clap! Clapper %s", clapper_state ? "ON" : "OFF");
+            zb_set_on_off(EP_CLAPPER, clapper_state);
         }
     }
 }
@@ -98,59 +153,58 @@ static void button_task(void *arg)
     while (1) {
         if (gpio_get_level(BUTTON_PIN) == 0) {
             int64_t now = esp_timer_get_time();
-            if ((now - last_triggered) >= DEBOUNCE_US) {
+            if ((now - last_triggered) >= BUTTON_DEBOUNCE_US) {
                 last_triggered = now;
-                led_state = !led_state;
-                gpio_set_level(LED_PIN, led_state);
-                ESP_LOGI(TAG, "Button! LED %s", led_state ? "ON" : "OFF");
-                send_toggle(EP_BUTTON);
+                button_state = !button_state;
+                gpio_set_level(LED_PIN, button_state || clapper_state);
+                ESP_LOGI(TAG, "Button! Button EP %s", button_state ? "ON" : "OFF");
+                zb_set_on_off(EP_BUTTON, button_state);
             }
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
+/* ── Zigbee init ─────────────────────────────────────────────────────── */
+
 static esp_zb_ep_list_t *create_endpoints(void)
 {
-    /* ZCL character strings: first byte is length */
-    static char manufacturer[] = "\x0Aadambenovic";
-    static char model_id[]     = "\x0Ac6clapper";
-
     esp_zb_basic_cluster_cfg_t basic_cfg = {
         .zcl_version = ESP_ZB_ZCL_BASIC_ZCL_VERSION_DEFAULT_VALUE,
         .power_source = 0x01,
     };
-    esp_zb_on_off_cluster_cfg_t on_off_cfg = { .on_off = 0 };
-
+    esp_zb_on_off_light_cfg_t light_cfg = ESP_ZB_DEFAULT_ON_OFF_LIGHT_CONFIG();
     esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
 
-    /* EP_BUTTON: physical button */
+    /* EP_BUTTON */
     esp_zb_attribute_list_t *btn_basic = esp_zb_basic_cluster_create(&basic_cfg);
-    esp_zb_basic_cluster_add_attr(btn_basic, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, manufacturer);
-    esp_zb_basic_cluster_add_attr(btn_basic, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, model_id);
-    esp_zb_cluster_list_t *btn_clusters = esp_zb_zcl_cluster_list_create();
-    esp_zb_cluster_list_add_basic_cluster(btn_clusters, btn_basic, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-    esp_zb_cluster_list_add_on_off_cluster(btn_clusters,
-        esp_zb_on_off_cluster_create(&on_off_cfg), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
+    esp_zb_basic_cluster_add_attr(btn_basic, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID,
+                                  "adambenovic");
+    esp_zb_basic_cluster_add_attr(btn_basic, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,
+                                  "c6clapper-button");
+    esp_zb_cluster_list_t *btn_clusters = esp_zb_on_off_light_clusters_create(&light_cfg);
+    esp_zb_cluster_list_update_basic_cluster(btn_clusters, btn_basic,
+                                             ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_ep_list_add_ep(ep_list, btn_clusters, (esp_zb_endpoint_config_t){
         .endpoint = EP_BUTTON,
         .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .app_device_id = ESP_ZB_HA_ON_OFF_SWITCH_DEVICE_ID,
+        .app_device_id = ESP_ZB_HA_ON_OFF_LIGHT_DEVICE_ID,
         .app_device_version = 0,
     });
 
-    /* EP_CLAPPER: sound sensor */
+    /* EP_CLAPPER */
     esp_zb_attribute_list_t *clap_basic = esp_zb_basic_cluster_create(&basic_cfg);
-    esp_zb_basic_cluster_add_attr(clap_basic, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, manufacturer);
-    esp_zb_basic_cluster_add_attr(clap_basic, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, model_id);
-    esp_zb_cluster_list_t *clap_clusters = esp_zb_zcl_cluster_list_create();
-    esp_zb_cluster_list_add_basic_cluster(clap_clusters, clap_basic, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-    esp_zb_cluster_list_add_on_off_cluster(clap_clusters,
-        esp_zb_on_off_cluster_create(&on_off_cfg), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
+    esp_zb_basic_cluster_add_attr(clap_basic, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID,
+                                  "adambenovic");
+    esp_zb_basic_cluster_add_attr(clap_basic, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,
+                                  "c6clapper-sound");
+    esp_zb_cluster_list_t *clap_clusters = esp_zb_on_off_light_clusters_create(&light_cfg);
+    esp_zb_cluster_list_update_basic_cluster(clap_clusters, clap_basic,
+                                             ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_ep_list_add_ep(ep_list, clap_clusters, (esp_zb_endpoint_config_t){
         .endpoint = EP_CLAPPER,
         .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .app_device_id = ESP_ZB_HA_ON_OFF_SWITCH_DEVICE_ID,
+        .app_device_id = ESP_ZB_HA_ON_OFF_LIGHT_DEVICE_ID,
         .app_device_version = 0,
     });
 
@@ -172,10 +226,13 @@ static void zb_task(void *pvParameters)
     };
     esp_zb_init(&zb_nwk_cfg);
     esp_zb_device_register(create_endpoints());
+    esp_zb_core_action_handler_register(zb_action_handler);
     esp_zb_set_primary_network_channel_set(ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK);
     ESP_ERROR_CHECK(esp_zb_start(false));
     esp_zb_stack_main_loop();
 }
+
+/* ── app_main ────────────────────────────────────────────────────────── */
 
 void app_main(void)
 {
@@ -205,7 +262,7 @@ void app_main(void)
     ESP_ERROR_CHECK(gpio_config(&output_conf));
     gpio_set_level(LED_PIN, 0);
 
-    sound_evt_queue = xQueueCreate(4, sizeof(int64_t));
+    sound_evt_queue = xQueueCreate(8, sizeof(int64_t));
     configASSERT(sound_evt_queue);
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
     ESP_ERROR_CHECK(gpio_set_intr_type(SOUND_SENSOR_PIN, GPIO_INTR_POSEDGE));
