@@ -1,4 +1,4 @@
-IMAGE := espressif/idf:v5.4.0
+IMAGE := espressif/idf:release-v5.4
 
 PORT ?= /dev/ttyACM0
 
