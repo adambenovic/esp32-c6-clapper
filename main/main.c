@@ -101,20 +101,6 @@ static void zb_set_on_off(uint8_t ep, bool on)
     esp_zb_lock_release();
 }
 
-static void zb_report_on_off(uint8_t ep)
-{
-    if (!zb_started) return;
-    esp_zb_zcl_report_attr_cmd_t cmd = {
-        .address_mode           = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT,
-        .attributeID            = ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
-        .clusterID              = ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
-        .zcl_basic_cmd.src_endpoint = ep,
-    };
-    esp_zb_lock_acquire(portMAX_DELAY);
-    esp_zb_zcl_report_attr_cmd_req(&cmd);
-    esp_zb_lock_release();
-}
-
 /* ── ISR + tasks ─────────────────────────────────────────────────────── */
 
 static void IRAM_ATTR sound_isr_handler(void *arg)
@@ -160,7 +146,6 @@ static void sound_sensor_task(void *arg)
             gpio_set_level(LED_PIN, button_state || clapper_state);
             ESP_LOGI(TAG, "3-clap! Clapper %s", clapper_state ? "ON" : "OFF");
             zb_set_on_off(EP_CLAPPER, clapper_state);
-            zb_report_on_off(EP_CLAPPER);
 
             /* 3 s lockout: drain noise, sleep, drain again, reset debounce */
             int64_t drain;
@@ -184,7 +169,6 @@ static void button_task(void *arg)
                 gpio_set_level(LED_PIN, button_state || clapper_state);
                 ESP_LOGI(TAG, "Button! EP %s", button_state ? "ON" : "OFF");
                 zb_set_on_off(EP_BUTTON, button_state);
-                zb_report_on_off(EP_BUTTON);
             }
         }
         vTaskDelay(pdMS_TO_TICKS(10));
