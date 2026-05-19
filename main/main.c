@@ -160,8 +160,21 @@ static void sound_sensor_task(void *arg)
 static void button_task(void *arg)
 {
     int64_t last_triggered = 0;
+    int last_level = -1;
+    int alive_ctr = 0;
     while (1) {
-        if (gpio_get_level(BUTTON_PIN) == 0) {
+        int level = gpio_get_level(BUTTON_PIN);
+
+        if (++alive_ctr >= 200) {          /* log every 2 s to prove task alive */
+            alive_ctr = 0;
+            ESP_LOGI(TAG, "button_task alive, GPIO%d=%d", BUTTON_PIN, level);
+        }
+        if (level != last_level) {
+            ESP_LOGI(TAG, "Button GPIO%d level -> %d", BUTTON_PIN, level);
+            last_level = level;
+        }
+
+        if (level == 0) {
             int64_t now = esp_timer_get_time();
             if ((now - last_triggered) >= BUTTON_DEBOUNCE_US) {
                 last_triggered = now;
