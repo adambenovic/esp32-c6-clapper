@@ -1,0 +1,16 @@
+{
+  "name": "ESP32-C6 Zigbee Clapper",
+  "version": "0.0.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-C6",
+      "parts": [
+        {
+          "path": "https://adambenovic.github.io/esp32-c6-clapper/firmware-merged.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32-C6 Zigbee Clapper — Web Flasher</title>
+  <script type="module"
+    src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module">
+  </script>
+  <style>
+    body { font-family: sans-serif; max-width: 480px; margin: 4rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.25rem; }
+    p { color: #555; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>ESP32-C6 Zigbee Clapper</h1>
+  <p>Connect your ESP32-C6 via USB, then click <strong>Install</strong>.</p>
+  <p>Requires Chrome or Edge (WebSerial). The device will be erased before flashing.</p>
+  <esp-web-install-button
+    manifest="https://adambenovic.github.io/esp32-c6-clapper/manifest.json">
+  </esp-web-install-button>
+  <p>Source: <a href="https://github.com/adambenovic/esp32-c6-clapper">GitHub</a></p>
+</body>
+</html>
