@@ -112,14 +112,24 @@ static void button_task(void *arg)
 
 static void zb_task(void *pvParameters)
 {
-    esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZR_CONFIG();
+    esp_zb_platform_config_t platform_cfg = {
+        .radio_config = {.radio_mode = ZB_RADIO_MODE_NATIVE},
+        .host_config  = {.host_connection_mode = ZB_HOST_CONNECTION_MODE_NONE},
+    };
+    ESP_ERROR_CHECK(esp_zb_platform_config(&platform_cfg));
+
+    esp_zb_cfg_t zb_nwk_cfg = {
+        .esp_zb_role          = ESP_ZB_DEVICE_TYPE_ROUTER,
+        .install_code_policy  = false,
+        .nwk_cfg.zczr_cfg.max_children = 10,
+    };
     esp_zb_init(&zb_nwk_cfg);
 
     esp_zb_on_off_switch_cfg_t switch_cfg = ESP_ZB_DEFAULT_ON_OFF_SWITCH_CONFIG();
     esp_zb_ep_list_t *ep_list = esp_zb_on_off_switch_ep_create(ZB_ENDPOINT, &switch_cfg);
     esp_zb_device_register(ep_list);
 
-    esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
+    esp_zb_set_primary_network_channel_set(ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK);
     ESP_ERROR_CHECK(esp_zb_start(false));
     esp_zb_stack_main_loop();
 }
@@ -158,12 +168,6 @@ void app_main(void)
     ESP_ERROR_CHECK(gpio_set_intr_type(SOUND_SENSOR_PIN, GPIO_INTR_POSEDGE));
     ESP_ERROR_CHECK(gpio_isr_handler_add(SOUND_SENSOR_PIN, sound_isr_handler, NULL));
     ESP_ERROR_CHECK(gpio_intr_enable(SOUND_SENSOR_PIN));
-
-    esp_zb_platform_config_t config = {
-        .radio_config = ESP_ZB_DEFAULT_RADIO_CONFIG(),
-        .host_config  = ESP_ZB_DEFAULT_HOST_CONFIG(),
-    };
-    ESP_ERROR_CHECK(esp_zb_platform_config(&config));
 
     xTaskCreate(zb_task,           "zb_task",      4096, NULL, 6, NULL);
     xTaskCreate(sound_sensor_task, "sound_task",   4096, NULL, 5, NULL);

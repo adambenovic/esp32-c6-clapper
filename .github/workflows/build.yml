@@ -19,6 +19,7 @@ jobs:
       - name: Build firmware
         shell: bash
         run: |
+          git config --global --add safe.directory $GITHUB_WORKSPACE
           . $IDF_PATH/export.sh
           idf.py build
 
