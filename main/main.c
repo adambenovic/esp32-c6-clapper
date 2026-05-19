@@ -7,37 +7,37 @@
 #include "driver/gpio.h"
 #include "ha/esp_zigbee_ha_standard.h"
 
-#define SOUND_SENSOR_PIN        GPIO_NUM_4
-#define BUTTON_PIN              GPIO_NUM_22
-#define LED_PIN                 GPIO_NUM_5
+#define SOUND_SENSOR_PIN    GPIO_NUM_4
+#define BUTTON_PIN          GPIO_NUM_22
+#define LED_PIN             GPIO_NUM_5
 
-/* Clap pattern: 3 claps, each 150–1500 ms apart, within a 4 s window */
-#define CLAP_DEBOUNCE_US        (150 * 1000)
-#define CLAP_MAX_GAP_US         (1500 * 1000)
-#define CLAP_WINDOW_US          (4000 * 1000)
-#define CLAP_REQUIRED           3
+/* Clap pattern: 3 claps, 150–1500 ms apart, within 4 s */
+#define CLAP_DEBOUNCE_US    (150 * 1000)
+#define CLAP_MAX_GAP_US     (1500 * 1000)
+#define CLAP_WINDOW_US      (4000 * 1000)
+#define CLAP_REQUIRED       3
 
-/* Button debounce */
-#define BUTTON_DEBOUNCE_US      (50 * 1000)
+#define BUTTON_DEBOUNCE_US  (50 * 1000)
 
-/* Zigbee endpoints */
-#define EP_BUTTON               1
-#define EP_CLAPPER              2
+#define EP_BUTTON           1
+#define EP_CLAPPER          2
+
+/* ZCL character string: byte 0 = length, rest = ASCII */
+#define ZB_MANUFACTURER     "\x0B" "adambenovic"
+#define ZB_MODEL_BUTTON     "\x10" "c6clapper-button"
+#define ZB_MODEL_CLAPPER    "\x0F" "c6clapper-sound"
 
 static const char *TAG = "ZB_CLAPPER";
 static QueueHandle_t sound_evt_queue = NULL;
 static bool button_state  = false;
 static bool clapper_state = false;
 static bool zb_started    = false;
-static char s_mfr[]        = "\x0B" "adambenovic";
-static char s_model_btn[]  = "\x10" "c6clapper-button";
-static char s_model_clap[] = "\x0f" "c6clapper-sound";
 
 /* ── Zigbee stack callbacks ──────────────────────────────────────────── */
 
 void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 {
-    uint32_t *p_sg_p = signal_struct->p_app_signal;
+    uint32_t *p_sg_p     = signal_struct->p_app_signal;
     esp_err_t err_status = signal_struct->esp_err_status;
     esp_zb_app_signal_type_t sig_type = *p_sg_p;
 
@@ -49,18 +49,6 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
     case ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT:
         if (err_status == ESP_OK) {
             zb_started = true;
-            esp_zb_zcl_set_attribute_val(EP_BUTTON, ESP_ZB_ZCL_CLUSTER_ID_BASIC,
-                ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID,
-                s_mfr, false);
-            esp_zb_zcl_set_attribute_val(EP_BUTTON, ESP_ZB_ZCL_CLUSTER_ID_BASIC,
-                ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,
-                s_model_btn, false);
-            esp_zb_zcl_set_attribute_val(EP_CLAPPER, ESP_ZB_ZCL_CLUSTER_ID_BASIC,
-                ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID,
-                s_mfr, false);
-            esp_zb_zcl_set_attribute_val(EP_CLAPPER, ESP_ZB_ZCL_CLUSTER_ID_BASIC,
-                ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,
-                s_model_clap, false);
             esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
         } else {
             ESP_LOGW(TAG, "Zigbee init failed: %s", esp_err_to_name(err_status));
@@ -98,7 +86,7 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
     return ESP_OK;
 }
 
-/* ── Zigbee attribute update ─────────────────────────────────────────── */
+/* ── Zigbee attribute update + report ───────────────────────────────── */
 
 static void zb_set_on_off(uint8_t ep, bool on)
 {
@@ -110,6 +98,20 @@ static void zb_set_on_off(uint8_t ep, bool on)
         ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
         ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
         &value, false);
+    esp_zb_lock_release();
+}
+
+static void zb_report_on_off(uint8_t ep)
+{
+    if (!zb_started) return;
+    esp_zb_zcl_report_attr_cmd_t cmd = {
+        .address_mode           = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT,
+        .attributeID            = ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
+        .clusterID              = ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
+        .zcl_basic_cmd.src_endpoint = ep,
+    };
+    esp_zb_lock_acquire(portMAX_DELAY);
+    esp_zb_zcl_report_attr_cmd_req(&cmd);
     esp_zb_lock_release();
 }
 
@@ -127,25 +129,25 @@ static void sound_sensor_task(void *arg)
 {
     int64_t evt_time = 0;
     int64_t clap_times[CLAP_REQUIRED] = {0};
-    int clap_count = 0;
+    int     clap_count = 0;
+    int64_t last_evt   = 0;
 
     while (1) {
         if (!xQueueReceive(sound_evt_queue, &evt_time, portMAX_DELAY)) continue;
 
-        int64_t last = clap_count > 0 ? clap_times[clap_count - 1] : 0;
+        /* Global debounce — drop bursts regardless of clap_count */
+        if ((evt_time - last_evt) < CLAP_DEBOUNCE_US) continue;
+        last_evt = evt_time;
 
-        /* Ignore pulses within debounce window */
-        if (clap_count > 0 && (evt_time - last) < CLAP_DEBOUNCE_US) continue;
-
-        /* Gap too large — clap pattern broken, start over */
-        if (clap_count > 0 && (evt_time - last) > CLAP_MAX_GAP_US) {
-            ESP_LOGD(TAG, "Clap gap too large, reset");
+        /* Gap too large — pattern broken, start over */
+        if (clap_count > 0 && (evt_time - clap_times[clap_count - 1]) > CLAP_MAX_GAP_US) {
+            ESP_LOGD(TAG, "Gap too large, reset");
             clap_count = 0;
         }
 
-        /* Whole window expired — reset */
+        /* Window expired — reset */
         if (clap_count > 0 && (evt_time - clap_times[0]) > CLAP_WINDOW_US) {
-            ESP_LOGD(TAG, "Clap window expired, reset");
+            ESP_LOGD(TAG, "Window expired, reset");
             clap_count = 0;
         }
 
@@ -158,9 +160,14 @@ static void sound_sensor_task(void *arg)
             gpio_set_level(LED_PIN, button_state || clapper_state);
             ESP_LOGI(TAG, "3-clap! Clapper %s", clapper_state ? "ON" : "OFF");
             zb_set_on_off(EP_CLAPPER, clapper_state);
+            zb_report_on_off(EP_CLAPPER);
+
+            /* 3 s lockout: drain noise, sleep, drain again, reset debounce */
             int64_t drain;
             while (xQueueReceive(sound_evt_queue, &drain, 0) == pdTRUE) {}
             vTaskDelay(pdMS_TO_TICKS(3000));
+            while (xQueueReceive(sound_evt_queue, &drain, 0) == pdTRUE) {}
+            last_evt = esp_timer_get_time();
         }
     }
 }
@@ -175,8 +182,9 @@ static void button_task(void *arg)
                 last_triggered = now;
                 button_state = !button_state;
                 gpio_set_level(LED_PIN, button_state || clapper_state);
-                ESP_LOGI(TAG, "Button! Button EP %s", button_state ? "ON" : "OFF");
+                ESP_LOGI(TAG, "Button! EP %s", button_state ? "ON" : "OFF");
                 zb_set_on_off(EP_BUTTON, button_state);
+                zb_report_on_off(EP_BUTTON);
             }
         }
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -191,30 +199,42 @@ static esp_zb_ep_list_t *create_endpoints(void)
         .zcl_version = ESP_ZB_ZCL_BASIC_ZCL_VERSION_DEFAULT_VALUE,
         .power_source = 0x01,
     };
-    esp_zb_on_off_light_cfg_t light_cfg = ESP_ZB_DEFAULT_ON_OFF_LIGHT_CONFIG();
+    esp_zb_on_off_cluster_cfg_t on_off_cfg = {.on_off = 0};
     esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
 
-    /* EP_BUTTON */
+    /* EP_BUTTON — build from scratch: avoids duplicate basic attrs */
     esp_zb_attribute_list_t *btn_basic = esp_zb_basic_cluster_create(&basic_cfg);
-    esp_zb_cluster_list_t *btn_clusters = esp_zb_on_off_light_clusters_create(&light_cfg);
-    esp_zb_cluster_list_update_basic_cluster(btn_clusters, btn_basic,
-                                             ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_basic_cluster_add_attr(btn_basic, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID,
+                                  ZB_MANUFACTURER);
+    esp_zb_basic_cluster_add_attr(btn_basic, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,
+                                  ZB_MODEL_BUTTON);
+    esp_zb_cluster_list_t *btn_clusters = esp_zb_zcl_cluster_list_create();
+    esp_zb_cluster_list_add_basic_cluster(btn_clusters, btn_basic,
+                                          ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_cluster_list_add_on_off_cluster(btn_clusters,
+        esp_zb_on_off_cluster_create(&on_off_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_ep_list_add_ep(ep_list, btn_clusters, (esp_zb_endpoint_config_t){
-        .endpoint = EP_BUTTON,
-        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .app_device_id = ESP_ZB_HA_ON_OFF_LIGHT_DEVICE_ID,
+        .endpoint        = EP_BUTTON,
+        .app_profile_id  = ESP_ZB_AF_HA_PROFILE_ID,
+        .app_device_id   = ESP_ZB_HA_ON_OFF_LIGHT_DEVICE_ID,
         .app_device_version = 0,
     });
 
     /* EP_CLAPPER */
     esp_zb_attribute_list_t *clap_basic = esp_zb_basic_cluster_create(&basic_cfg);
-    esp_zb_cluster_list_t *clap_clusters = esp_zb_on_off_light_clusters_create(&light_cfg);
-    esp_zb_cluster_list_update_basic_cluster(clap_clusters, clap_basic,
-                                             ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_basic_cluster_add_attr(clap_basic, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID,
+                                  ZB_MANUFACTURER);
+    esp_zb_basic_cluster_add_attr(clap_basic, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,
+                                  ZB_MODEL_CLAPPER);
+    esp_zb_cluster_list_t *clap_clusters = esp_zb_zcl_cluster_list_create();
+    esp_zb_cluster_list_add_basic_cluster(clap_clusters, clap_basic,
+                                          ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_cluster_list_add_on_off_cluster(clap_clusters,
+        esp_zb_on_off_cluster_create(&on_off_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_ep_list_add_ep(ep_list, clap_clusters, (esp_zb_endpoint_config_t){
-        .endpoint = EP_CLAPPER,
-        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .app_device_id = ESP_ZB_HA_ON_OFF_LIGHT_DEVICE_ID,
+        .endpoint        = EP_CLAPPER,
+        .app_profile_id  = ESP_ZB_AF_HA_PROFILE_ID,
+        .app_device_id   = ESP_ZB_HA_ON_OFF_LIGHT_DEVICE_ID,
         .app_device_version = 0,
     });
 
