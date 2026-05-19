@@ -11,7 +11,8 @@
 #define BUTTON_PIN          GPIO_NUM_22
 #define LED_PIN             GPIO_NUM_5
 #define DEBOUNCE_US         (500 * 1000)
-#define ZB_ENDPOINT         1
+#define EP_BUTTON           1
+#define EP_CLAPPER          2
 
 static const char *TAG = "ZB_CLAPPER";
 static QueueHandle_t sound_evt_queue = NULL;
@@ -51,44 +52,19 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
     }
 }
 
-static void set_led(bool on)
+static void send_toggle(uint8_t src_ep)
 {
-    led_state = on;
-    gpio_set_level(LED_PIN, led_state);
-    ESP_LOGI(TAG, "LED %s", led_state ? "ON" : "OFF");
-
     if (!zb_started) {
         return;
     }
-
-    uint8_t value = led_state ? 1 : 0;
+    esp_zb_zcl_on_off_cmd_t cmd = {
+        .zcl_basic_cmd.src_endpoint = src_ep,
+        .address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT,
+        .on_off_cmd_id = ESP_ZB_ZCL_CMD_ON_OFF_TOGGLE_ID,
+    };
     esp_zb_lock_acquire(portMAX_DELAY);
-    esp_zb_zcl_set_attribute_val(ZB_ENDPOINT,
-        ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
-        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-        ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
-        &value, false);
+    esp_zb_zcl_on_off_cmd_req(&cmd);
     esp_zb_lock_release();
-}
-
-static void toggle_and_send(void)
-{
-    set_led(!led_state);
-}
-
-static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
-{
-    if (callback_id == ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID) {
-        const esp_zb_zcl_set_attr_value_message_t *msg = message;
-        if (msg->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF &&
-            msg->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
-            bool on = *(uint8_t *)msg->attribute.data.value;
-            led_state = on;
-            gpio_set_level(LED_PIN, led_state);
-            ESP_LOGI(TAG, "HA set LED %s", led_state ? "ON" : "OFF");
-        }
-    }
-    return ESP_OK;
 }
 
 static void IRAM_ATTR sound_isr_handler(void *arg)
@@ -107,8 +83,10 @@ static void sound_sensor_task(void *arg)
         if (xQueueReceive(sound_evt_queue, &evt_time, portMAX_DELAY)) {
             if ((evt_time - last_triggered) >= DEBOUNCE_US) {
                 last_triggered = evt_time;
-                ESP_LOGI(TAG, "Clap detected!");
-                toggle_and_send();
+                led_state = !led_state;
+                gpio_set_level(LED_PIN, led_state);
+                ESP_LOGI(TAG, "Clap! LED %s", led_state ? "ON" : "OFF");
+                send_toggle(EP_CLAPPER);
             }
         }
     }
@@ -122,12 +100,53 @@ static void button_task(void *arg)
             int64_t now = esp_timer_get_time();
             if ((now - last_triggered) >= DEBOUNCE_US) {
                 last_triggered = now;
-                ESP_LOGI(TAG, "Button pressed!");
-                toggle_and_send();
+                led_state = !led_state;
+                gpio_set_level(LED_PIN, led_state);
+                ESP_LOGI(TAG, "Button! LED %s", led_state ? "ON" : "OFF");
+                send_toggle(EP_BUTTON);
             }
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+}
+
+static esp_zb_ep_list_t *create_endpoints(void)
+{
+    esp_zb_basic_cluster_cfg_t basic_cfg = {
+        .zcl_version = ESP_ZB_ZCL_BASIC_ZCL_VERSION_DEFAULT_VALUE,
+        .power_source = 0x01,
+    };
+    esp_zb_on_off_cluster_cfg_t on_off_cfg = { .on_off = 0 };
+
+    esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
+
+    /* EP_BUTTON: physical button */
+    esp_zb_cluster_list_t *btn_clusters = esp_zb_zcl_cluster_list_create();
+    esp_zb_cluster_list_add_basic_cluster(btn_clusters,
+        esp_zb_basic_cluster_create(&basic_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_cluster_list_add_on_off_cluster(btn_clusters,
+        esp_zb_on_off_cluster_create(&on_off_cfg), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
+    esp_zb_ep_list_add_ep(ep_list, btn_clusters, (esp_zb_endpoint_config_t){
+        .endpoint = EP_BUTTON,
+        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+        .app_device_id = ESP_ZB_HA_ON_OFF_SWITCH_DEVICE_ID,
+        .app_device_version = 0,
+    });
+
+    /* EP_CLAPPER: sound sensor */
+    esp_zb_cluster_list_t *clap_clusters = esp_zb_zcl_cluster_list_create();
+    esp_zb_cluster_list_add_basic_cluster(clap_clusters,
+        esp_zb_basic_cluster_create(&basic_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_cluster_list_add_on_off_cluster(clap_clusters,
+        esp_zb_on_off_cluster_create(&on_off_cfg), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
+    esp_zb_ep_list_add_ep(ep_list, clap_clusters, (esp_zb_endpoint_config_t){
+        .endpoint = EP_CLAPPER,
+        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+        .app_device_id = ESP_ZB_HA_ON_OFF_SWITCH_DEVICE_ID,
+        .app_device_version = 0,
+    });
+
+    return ep_list;
 }
 
 static void zb_task(void *pvParameters)
@@ -139,17 +158,12 @@ static void zb_task(void *pvParameters)
     ESP_ERROR_CHECK(esp_zb_platform_config(&platform_cfg));
 
     esp_zb_cfg_t zb_nwk_cfg = {
-        .esp_zb_role          = ESP_ZB_DEVICE_TYPE_ROUTER,
-        .install_code_policy  = false,
+        .esp_zb_role         = ESP_ZB_DEVICE_TYPE_ROUTER,
+        .install_code_policy = false,
         .nwk_cfg.zczr_cfg.max_children = 10,
     };
     esp_zb_init(&zb_nwk_cfg);
-
-    esp_zb_on_off_light_cfg_t light_cfg = ESP_ZB_DEFAULT_ON_OFF_LIGHT_CONFIG();
-    esp_zb_ep_list_t *ep_list = esp_zb_on_off_light_ep_create(ZB_ENDPOINT, &light_cfg);
-    esp_zb_device_register(ep_list);
-    esp_zb_core_action_handler_register(zb_action_handler);
-
+    esp_zb_device_register(create_endpoints());
     esp_zb_set_primary_network_channel_set(ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK);
     ESP_ERROR_CHECK(esp_zb_start(false));
     esp_zb_stack_main_loop();
@@ -190,7 +204,7 @@ void app_main(void)
     ESP_ERROR_CHECK(gpio_isr_handler_add(SOUND_SENSOR_PIN, sound_isr_handler, NULL));
     ESP_ERROR_CHECK(gpio_intr_enable(SOUND_SENSOR_PIN));
 
-    xTaskCreate(zb_task,           "zb_task",      4096, NULL, 6, NULL);
-    xTaskCreate(sound_sensor_task, "sound_task",   4096, NULL, 5, NULL);
-    xTaskCreate(button_task,       "button_task",  4096, NULL, 5, NULL);
+    xTaskCreate(zb_task,           "zb_task",     4096, NULL, 6, NULL);
+    xTaskCreate(sound_sensor_task, "sound_task",  4096, NULL, 5, NULL);
+    xTaskCreate(button_task,       "button_task", 4096, NULL, 5, NULL);
 }
