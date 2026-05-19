@@ -51,9 +51,9 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
     }
 }
 
-static void toggle_and_send(void)
+static void set_led(bool on)
 {
-    led_state = !led_state;
+    led_state = on;
     gpio_set_level(LED_PIN, led_state);
     ESP_LOGI(TAG, "LED %s", led_state ? "ON" : "OFF");
 
@@ -61,14 +61,34 @@ static void toggle_and_send(void)
         return;
     }
 
-    esp_zb_zcl_on_off_cmd_t cmd = {
-        .zcl_basic_cmd.src_endpoint = ZB_ENDPOINT,
-        .address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT,
-        .on_off_cmd_id = ESP_ZB_ZCL_CMD_ON_OFF_TOGGLE_ID,
-    };
+    uint8_t value = led_state ? 1 : 0;
     esp_zb_lock_acquire(portMAX_DELAY);
-    esp_zb_zcl_on_off_cmd_req(&cmd);
+    esp_zb_zcl_set_attribute_val(ZB_ENDPOINT,
+        ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
+        &value, false);
     esp_zb_lock_release();
+}
+
+static void toggle_and_send(void)
+{
+    set_led(!led_state);
+}
+
+static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
+{
+    if (callback_id == ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID) {
+        const esp_zb_zcl_set_attr_value_message_t *msg = message;
+        if (msg->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF &&
+            msg->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
+            bool on = *(uint8_t *)msg->attribute.data.value;
+            led_state = on;
+            gpio_set_level(LED_PIN, led_state);
+            ESP_LOGI(TAG, "HA set LED %s", led_state ? "ON" : "OFF");
+        }
+    }
+    return ESP_OK;
 }
 
 static void IRAM_ATTR sound_isr_handler(void *arg)
@@ -125,9 +145,10 @@ static void zb_task(void *pvParameters)
     };
     esp_zb_init(&zb_nwk_cfg);
 
-    esp_zb_on_off_switch_cfg_t switch_cfg = ESP_ZB_DEFAULT_ON_OFF_SWITCH_CONFIG();
-    esp_zb_ep_list_t *ep_list = esp_zb_on_off_switch_ep_create(ZB_ENDPOINT, &switch_cfg);
+    esp_zb_on_off_light_cfg_t light_cfg = ESP_ZB_DEFAULT_ON_OFF_LIGHT_CONFIG();
+    esp_zb_ep_list_t *ep_list = esp_zb_on_off_light_ep_create(ZB_ENDPOINT, &light_cfg);
     esp_zb_device_register(ep_list);
+    esp_zb_core_action_handler_register(zb_action_handler);
 
     esp_zb_set_primary_network_channel_set(ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK);
     ESP_ERROR_CHECK(esp_zb_start(false));
