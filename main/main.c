@@ -29,6 +29,9 @@ static QueueHandle_t sound_evt_queue = NULL;
 static bool button_state  = false;
 static bool clapper_state = false;
 static bool zb_started    = false;
+static char s_mfr[]        = "\x0B" "adambenovic";
+static char s_model_btn[]  = "\x10" "c6clapper-button";
+static char s_model_clap[] = "\x0f" "c6clapper-sound";
 
 /* ── Zigbee stack callbacks ──────────────────────────────────────────── */
 
@@ -46,6 +49,18 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
     case ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT:
         if (err_status == ESP_OK) {
             zb_started = true;
+            esp_zb_zcl_set_attribute_val(EP_BUTTON, ESP_ZB_ZCL_CLUSTER_ID_BASIC,
+                ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID,
+                s_mfr, false);
+            esp_zb_zcl_set_attribute_val(EP_BUTTON, ESP_ZB_ZCL_CLUSTER_ID_BASIC,
+                ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,
+                s_model_btn, false);
+            esp_zb_zcl_set_attribute_val(EP_CLAPPER, ESP_ZB_ZCL_CLUSTER_ID_BASIC,
+                ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID,
+                s_mfr, false);
+            esp_zb_zcl_set_attribute_val(EP_CLAPPER, ESP_ZB_ZCL_CLUSTER_ID_BASIC,
+                ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,
+                s_model_clap, false);
             esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
         } else {
             ESP_LOGW(TAG, "Zigbee init failed: %s", esp_err_to_name(err_status));
@@ -143,6 +158,9 @@ static void sound_sensor_task(void *arg)
             gpio_set_level(LED_PIN, button_state || clapper_state);
             ESP_LOGI(TAG, "3-clap! Clapper %s", clapper_state ? "ON" : "OFF");
             zb_set_on_off(EP_CLAPPER, clapper_state);
+            int64_t drain;
+            while (xQueueReceive(sound_evt_queue, &drain, 0) == pdTRUE) {}
+            vTaskDelay(pdMS_TO_TICKS(3000));
         }
     }
 }
@@ -178,10 +196,6 @@ static esp_zb_ep_list_t *create_endpoints(void)
 
     /* EP_BUTTON */
     esp_zb_attribute_list_t *btn_basic = esp_zb_basic_cluster_create(&basic_cfg);
-    esp_zb_basic_cluster_add_attr(btn_basic, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID,
-                                  "adambenovic");
-    esp_zb_basic_cluster_add_attr(btn_basic, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,
-                                  "c6clapper-button");
     esp_zb_cluster_list_t *btn_clusters = esp_zb_on_off_light_clusters_create(&light_cfg);
     esp_zb_cluster_list_update_basic_cluster(btn_clusters, btn_basic,
                                              ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
@@ -194,10 +208,6 @@ static esp_zb_ep_list_t *create_endpoints(void)
 
     /* EP_CLAPPER */
     esp_zb_attribute_list_t *clap_basic = esp_zb_basic_cluster_create(&basic_cfg);
-    esp_zb_basic_cluster_add_attr(clap_basic, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID,
-                                  "adambenovic");
-    esp_zb_basic_cluster_add_attr(clap_basic, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,
-                                  "c6clapper-sound");
     esp_zb_cluster_list_t *clap_clusters = esp_zb_on_off_light_clusters_create(&light_cfg);
     esp_zb_cluster_list_update_basic_cluster(clap_clusters, clap_basic,
                                              ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
