@@ -1,6 +1,6 @@
 {
   "name": "ESP32-C6 Zigbee Clapper",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "new_install_prompt_erase": true,
   "builds": [
     {
