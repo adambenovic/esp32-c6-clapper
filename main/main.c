@@ -8,8 +8,8 @@
 #include "ha/esp_zigbee_ha_standard.h"
 
 #define SOUND_SENSOR_PIN    GPIO_NUM_4
-#define BUTTON_PIN          GPIO_NUM_9   /* TEST: BOOT button on devkit — swap back to 22 if GPIO9 works */
-#define LED_PIN             GPIO_NUM_5
+#define BUTTON_PIN          GPIO_NUM_5
+#define LED_PIN             GPIO_NUM_22
 
 /* Clap pattern: 3 claps, 150–1500 ms apart, within 4 s */
 #define CLAP_DEBOUNCE_US    (150 * 1000)

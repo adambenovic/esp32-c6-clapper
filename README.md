@@ -7,8 +7,8 @@ Clap-activated Zigbee switch built on the ESP32-C6. Detects sound events via a m
 | Signal | GPIO |
 |---|---|
 | Sound sensor (digital out) | GPIO 4 |
-| Manual button | GPIO 22 |
-| Status LED | GPIO 5 |
+| Manual button | GPIO 5 |
+| Status LED | GPIO 22 |
 
 - Sound sensor pin is pulled up internally; trigger on rising edge
 - Button pin is pulled up internally; active low
